@@ -85,6 +85,7 @@ python_installation.install_sources(postcard_core_store_sources, subdir: 'postca
 postcard_core_net_sources = [
   'postcard/core/net/__init__.py',
   'postcard/core/net/auth.py',
+  'postcard/core/net/google_oauth.py',
   'postcard/core/net/errors.py',
   'postcard/core/net/graph_folders.py',
   'postcard/core/net/graph_messages.py',
