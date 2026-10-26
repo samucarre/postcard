@@ -1,0 +1,6 @@
+#!/bin/sh
+P=/opt/gtk420; L=$P/lib/aarch64-linux-gnu
+export LD_LIBRARY_PATH="$L${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export GI_TYPELIB_PATH="$L/girepository-1.0${GI_TYPELIB_PATH:+:$GI_TYPELIB_PATH}"
+export PYTHONPATH="$P/lib/python3/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 "$(dirname "$0")/postcard-mcp.py"
