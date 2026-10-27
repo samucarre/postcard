@@ -20,3 +20,8 @@ Postcard pide Python 3.14+ (`IMAP4.idle()` para vigilar la bandeja) y Debian 13 
 `uv python install 3.15` → venv `/opt/gtk420/py315` → `pip install pygobject` (compila PyGObject 3.58 contra
 `libgirepository-2.0-dev` de Debian en segundos) → `exec /opt/gtk420/py315/bin/python3 /opt/gtk420/bin/postcard`.
 El paquete puro instalado por meson en `/opt/gtk420/lib/python3/dist-packages` sirve con cualquier Python.
+
+## Debian 14 (27-oct-2026)
+Con Debian 14 (GTK 4.24, libadwaita 1.10, Python 3.14) ya no hace falta ni el prefijo /opt/gtk420 ni el Python 3.15:
+`meson setup build --prefix=/usr/local -Dbindir=libexec/postcard && ninja -C build && sudo ninja -C build install`.
+El paquete va a /usr/local/lib/python3/dist-packages (fuera de sys.path): el lanzador exporta PYTHONPATH.
