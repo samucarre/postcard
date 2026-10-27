@@ -6,12 +6,17 @@ from .email import Email
 class Conversation(GObject.Object):
     __gtype_name__ = "PostcardConversation"
 
-    def __init__(self, emails: list[Email]) -> None:
+    def __init__(self, emails: list[Email], id: int | None = None) -> None:
         super().__init__()
         self.emails: list[Email] = emails
+        # With conversation grouping off, every message is its own row and must
+        # not share the id of the thread it would otherwise belong to.
+        self._id: int | None = id
 
     @property
     def id(self) -> int:
+        if self._id is not None:
+            return self._id
         return self.emails[0].conversation_id or self.emails[0].id
 
     @property

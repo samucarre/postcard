@@ -21,6 +21,11 @@
 			<summary>Show account names in the sidebar</summary>
 			<description>Show each account's display name in the folder sidebar instead of its email address.</description>
 		</key>
+		<key name="group-conversations" type="b">
+			<default>true</default>
+			<summary>Group messages into conversations</summary>
+			<description>Show replies and messages with the same subject as one conversation. Off, every message is its own row.</description>
+		</key>
 		<key name="run-in-background" type="b">
 			<default>false</default>
 			<summary>Keep running in the background</summary>

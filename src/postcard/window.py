@@ -224,6 +224,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self._avatar_handler = self._settings.connect(
             "changed::load-sender-avatars", lambda *_: self._refresh_conversations()
         )
+        self._db.group_conversations = self._settings.get_boolean("group-conversations")
+        self._grouping_handler = self._settings.connect(
+            "changed::group-conversations", self._on_grouping_changed
+        )
         self._account_label_handler = self._settings.connect(
             f"changed::{SETTING_ACCOUNT_DISPLAY_NAME}",
             lambda *_: self._relabel_accounts(),
@@ -459,6 +463,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         mail_sync.close_sessions()
         self._network.disconnect(self._network_handler)
         self._settings.disconnect(self._avatar_handler)
+        self._settings.disconnect(self._grouping_handler)
         self._settings.disconnect(self._account_label_handler)
         if self._clock_subscription:
             Gio.bus_get_sync(Gio.BusType.SESSION).signal_unsubscribe(
@@ -1710,6 +1715,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # search query if one is typed. Called on folder change and search change.
     # keep_id re-selects that conversation if it's still in the list, so a mail
     # action can refresh without reloading the reader.
+    def _on_grouping_changed(self, settings: Gio.Settings, key: str) -> None:
+        self._db.group_conversations = settings.get_boolean(key)
+        self._refresh_conversations()
+
     def _refresh_conversations(self, keep_id: int | None = None) -> None:
         if self._current_folder is None:
             return

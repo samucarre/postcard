@@ -24,6 +24,7 @@ class PostcardPreferencesDialog(Adw.PreferencesDialog):
     images_row: Adw.SwitchRow = Gtk.Template.Child()
     avatars_row: Adw.SwitchRow = Gtk.Template.Child()
     account_names_row: Adw.SwitchRow = Gtk.Template.Child()
+    group_conversations_row: Adw.SwitchRow = Gtk.Template.Child()
     background_row: Adw.SwitchRow = Gtk.Template.Child()
     autostart_row: Adw.SwitchRow = Gtk.Template.Child()
     signature_enabled_row: Adw.SwitchRow = Gtk.Template.Child()
@@ -40,6 +41,9 @@ class PostcardPreferencesDialog(Adw.PreferencesDialog):
         settings.bind("load-sender-avatars", self.avatars_row, "active", flags)
         settings.bind(
             "show-account-display-name", self.account_names_row, "active", flags
+        )
+        settings.bind(
+            "group-conversations", self.group_conversations_row, "active", flags
         )
         settings.bind("run-in-background", self.background_row, "active", flags)
         settings.bind("signature-enabled", self.signature_enabled_row, "active", flags)

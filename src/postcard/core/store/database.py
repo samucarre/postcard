@@ -113,6 +113,9 @@ class Database:
 
         self._conn = sqlite3.connect(path)
         self._conn.row_factory = sqlite3.Row
+        # Mirrors the "group-conversations" setting: off, every message is
+        # listed on its own instead of threaded by reply headers and subject.
+        self.group_conversations: bool = True
         # A sync commits once per message it stores, and the default journal
         # fsyncs on every one of those. Under WAL a commit is an append, and
         # NORMAL leaves the fsync to the checkpoint -- the durability given up
@@ -496,11 +499,13 @@ class Database:
             return self.conversations_in_folders(folder_ids)
 
         places = ",".join("?" * len(folder_ids))
+        # Ungrouped, only the matching messages themselves are listed.
+        thread_key = "COALESCE({0}conversation_id, {0}id)" if self.group_conversations else "{0}id"
         rows = self._conn.execute(
             f"""
             SELECT {_EMAIL_COLUMNS} FROM emails
-            WHERE folder_id IN ({places}) AND COALESCE(conversation_id, id) IN (
-                SELECT COALESCE(e.conversation_id, e.id)
+            WHERE folder_id IN ({places}) AND {thread_key.format("")} IN (
+                SELECT {thread_key.format("e.")}
                 FROM emails_fts f
                 JOIN emails e ON e.id = f.rowid
                 WHERE e.folder_id IN ({places}) AND emails_fts MATCH ?
@@ -516,13 +521,15 @@ class Database:
         groups: dict[int, list[Email]] = {}
         for row in rows:
             email = self._email_from_row(row)
-            key = email.conversation_id or email.id
+            key = (email.conversation_id or email.id) if self.group_conversations else email.id
             groups.setdefault(key, []).append(email)
 
         conversations = []
-        for mails in groups.values():
+        for key, mails in groups.items():
             mails.sort(key=_arrival_key)  # oldest first, so .latest is right
-            conversations.append(Conversation(mails))
+            conversations.append(
+                Conversation(mails) if self.group_conversations else Conversation(mails, id=key)
+            )
         thread_key = _sent_key if is_multi_folder else _arrival_key
         conversations.sort(key=lambda c: thread_key(c.latest), reverse=True)
         return conversations
