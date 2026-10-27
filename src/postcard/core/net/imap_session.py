@@ -305,10 +305,52 @@ class ImapSession:
         try:
             # New in Python 3.14, which the Flatpak runtime ships; pyright
             # checks against 3.12. It sends DONE on the way out of the block.
+            if not hasattr(imap, "idle"):
+                # Debian 13 runs Python 3.13: without this the watcher died on
+                # AttributeError every time and the inbox only refreshed on
+                # the 15-minute poll.
+                return self._idle_by_hand(imap, seconds)
             with imap.idle(duration=seconds) as idler:  # pyright: ignore[reportAttributeAccessIssue]
                 return any(kind in IDLE_CHANGES for kind, _data in idler)
         except imaplib.IMAP4.error as error:
             raise ImapError(f"IDLE failed: {error}") from error
+
+    def _idle_by_hand(self, imap: imaplib.IMAP4, seconds: float) -> bool:
+        """IDLE (RFC 2177) on the wire for a Python older than 3.14.
+
+        Reads the untagged lines itself instead of through imaplib's parser,
+        so nothing is left behind in its untagged-response bookkeeping.
+        """
+        tag = imap._new_tag()  # pyright: ignore[reportAttributeAccessIssue]
+        imap.send(tag + b" IDLE\r\n")
+        line = imap.readline()
+        if not line.startswith(b"+"):
+            raise ImapError(f"IDLE refused: {line!r}")
+        sock = imap.socket()
+        previous = sock.gettimeout()
+        sock.settimeout(seconds)
+        changed = False
+        try:
+            while True:
+                line = imap.readline()
+                if not line:
+                    raise ImapError("connection closed during IDLE")
+                # "* 12 EXISTS", "* 3 EXPUNGE"; a FETCH or "* OK Still here" is noise.
+                if line.startswith(b"*"):
+                    kind = line.split()[-1].decode("ascii", "replace").upper()
+                    if kind in IDLE_CHANGES:
+                        changed = True
+                        break
+        except TimeoutError:
+            pass
+        finally:
+            sock.settimeout(previous)
+        imap.send(b"DONE\r\n")
+        while True:
+            line = imap.readline()
+            if not line or line.startswith(tag):
+                break
+        return changed
 
     def append(self, mailbox: str, raw: bytes) -> None:
         """Upload a message into a mailbox, without selecting it first.
@@ -330,9 +372,15 @@ class ImapSession:
             raise ImapError(f"could not update flags on {uids}: {payload}")
 
     def search_all_uids(self) -> set[str]:
-        """Return every UID in the currently selected mailbox."""
+        """Return every UID in the currently selected mailbox.
+
+        Asked as a UID range rather than ALL: iCloud answers ALL from a stale
+        index that still lists messages moved or deleted long ago (129k UIDs
+        for a mailbox of 119k), so rows that left the folder were never pruned
+        and opened as "no message body". UID 1:* is exact there, and quicker.
+        """
         try:
-            status, payload = self._require_imap().uid("SEARCH", "ALL")
+            status, payload = self._require_imap().uid("SEARCH", "UID", "1:*")
         except imaplib.IMAP4.error as error:
             raise ImapError(f"search failed: {error}") from error
 
