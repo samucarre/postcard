@@ -15,6 +15,7 @@ from .core import APP_ID
 from .core.store.database import Database
 from .preferences_dialog import PostcardPreferencesDialog
 from .tray import Tray
+from .webkit_sandbox import expose_graphics_driver_paths
 from .window import PostcardMainWindow
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,8 @@ class PostcardApplication(Adw.Application):
 
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
+        # Before any WebView exists: the sandbox paths can't change once a web process runs.
+        expose_graphics_driver_paths()
         self.tray.start()
         self.settings.connect(
             "changed::run-in-background", self._on_run_in_background_changed

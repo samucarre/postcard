@@ -46,6 +46,7 @@ postcard_sources = [
   'postcard/composer_window.py',
   'postcard/preferences_dialog.py',
   'postcard/tray.py',
+  'postcard/webkit_sandbox.py',
   'postcard/mail_sync.py',
   'postcard/folder_row.py',
 ]
