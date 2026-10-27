@@ -13,3 +13,10 @@ Detalles que cuestan tiempo si no se saben:
 - `blueprint-compiler` necesita ver el typelib de libadwaita 1.8 (`GI_TYPELIB_PATH`) para compilar `shortcuts-dialog.blp`.
 
 La receta completa está en el repo del sistema: `waybian/parches/postcard/compilar-gtk420-postcard.sh`.
+
+## Python 3.15 (27-oct-2026)
+Postcard pide Python 3.14+ (`IMAP4.idle()` para vigilar la bandeja) y Debian 13 trae 3.13. En vez del parche
+`_idle_by_hand` (que se queda de reserva), el lanzador usa un CPython 3.15 oficial precompilado:
+`uv python install 3.15` → venv `/opt/gtk420/py315` → `pip install pygobject` (compila PyGObject 3.58 contra
+`libgirepository-2.0-dev` de Debian en segundos) → `exec /opt/gtk420/py315/bin/python3 /opt/gtk420/bin/postcard`.
+El paquete puro instalado por meson en `/opt/gtk420/lib/python3/dist-packages` sirve con cualquier Python.
