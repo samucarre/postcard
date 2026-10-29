@@ -315,8 +315,17 @@ template $PostcardMainWindow: Adw.ApplicationWindow {
 
                         styles ["reader-body"]
 
-                        child: Gtk.Box thread_box {
-                          orientation: vertical;
+                        // Left to itself GTK wraps thread_box in a viewport that
+                        // scrolls to the focused child: a click on a body focuses
+                        // its WebView, the pane jumps to the body's top between
+                        // press and release, and the link under the pointer never
+                        // gets its click.
+                        child: Gtk.Viewport {
+                          scroll-to-focus: false;
+
+                          child: Gtk.Box thread_box {
+                            orientation: vertical;
+                          };
                         };
                       }
                     };
