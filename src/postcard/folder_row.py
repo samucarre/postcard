@@ -1,4 +1,4 @@
-from gi.repository import Adw, Gtk
+from gi.repository import Adw, Gtk, Pango
 
 from . import mail_sync
 from .core.models.folder import Folder
@@ -20,7 +20,13 @@ class FolderRow(Gtk.Box):
         self._icon = Gtk.Image()
         self.append(self._icon)
 
-        self._name_label = Gtk.Label(xalign=0, hexpand=True)
+        # Ellipsized, or the longest folder or account name would set how
+        # narrow the whole sidebar can be dragged; cut short, it shows in full
+        # on hover.
+        self._name_label = Gtk.Label(
+            xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END, has_tooltip=True
+        )
+        self._name_label.connect("query-tooltip", self._on_name_query_tooltip)
         self.append(self._name_label)
 
         # Adw.Spinner spins whenever it is visible -- no start/stop to track.
@@ -41,6 +47,19 @@ class FolderRow(Gtk.Box):
         click = Gtk.GestureClick()
         click.connect("released", self._on_released)
         self.add_controller(click)
+
+    @staticmethod
+    def _on_name_query_tooltip(
+        label: Gtk.Label,
+        _x: int,
+        _y: int,
+        _is_keyboard: bool,
+        tooltip: Gtk.Tooltip,
+    ) -> bool:
+        if not label.get_layout().is_ellipsized():
+            return False
+        tooltip.set_text(label.get_label())
+        return True
 
     def _on_released(
         self, _gesture: Gtk.GestureClick, n_press: int, _x: float, _y: float
