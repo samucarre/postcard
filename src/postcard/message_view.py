@@ -35,9 +35,23 @@ AVATAR_SIZE = 40
 # A body is as tall as its content, so the reader pane is the only scroller.
 # The root element is a block formatting context, so its box holds floats and
 # the body's margins, unlike scrollHeight, which never drops below the viewport.
-MEASURE_BODY = "document.documentElement.getBoundingClientRect().height"
+# But a message that sets `html, body {height: 100%}` (PayPal's receipts do)
+# makes the root exactly as tall as the 1px viewport it is measured in, however
+# long the body is. A root that tall took its height from the viewport, not its
+# content, so its scrollHeight -- the content's extent -- is the height instead.
+MEASURE_BODY = """(() => {
+    const root = document.documentElement;
+    const height = root.getBoundingClientRect().height;
+    const isViewportTall = Math.abs(height - window.innerHeight) < 1;
+    return isViewportTall ? Math.max(height, root.scrollHeight) : height;
+})()"""
 # Used only if measuring fails, so the body never collapses to nothing.
 FALLBACK_BODY_HEIGHT = 800
+# The web process draws the whole view into one GPU buffer, and a GPU allocates
+# none taller than its texture limit -- 16384 pixels on most -- so a long
+# newsletter came out blank ("Failed to create GBM buffer"). A body that long
+# stops growing there and scrolls the rest of itself.
+MAX_BUFFER_PIXELS = 16384
 # Let a window drag settle before reloading a body reflowed by the new width.
 RELOAD_DELAY_MS = 100
 
@@ -389,7 +403,8 @@ class MessageView(Gtk.Box):
                 exc_info=True,
             )
             height = FALLBACK_BODY_HEIGHT
-        webview.body_height = height
+        max_height = MAX_BUFFER_PIXELS // max(webview.get_scale_factor(), 1)
+        webview.body_height = min(height, max_height)
         webview.queue_resize()
 
     def _on_dark_changed(self, _manager: Adw.StyleManager, _pspec: object) -> None:
