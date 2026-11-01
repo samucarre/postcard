@@ -224,3 +224,46 @@ def test_unsubscribe_ignores_a_scheme_we_would_never_open():
 
 def test_a_message_from_no_mailing_list_has_no_unsubscribe():
     assert parse_unsubscribe(PLAIN) is None
+
+
+def related(image_headers: bytes, html: bytes = b'<img src="cid:image0">') -> bytes:
+    return (
+        b"From: a@x\nMIME-Version: 1.0\n"
+        b'Content-Type: multipart/related; boundary="B"; type="text/html"\n\n'
+        b"--B\nContent-Type: text/html\n\n" + html + b"\n"
+        b"--B\nContent-Type: image/png\nContent-Transfer-Encoding: base64\n"
+        + image_headers
+        + b"\n\niVBORw==\n"
+        b"--B--\n"
+    )
+
+
+def test_a_cid_image_is_drawn_in_the_body_not_listed_as_a_file():
+    parsed = parse_message(related(b"Content-ID: <image0>"))
+    assert parsed.html_body is not None
+    assert 'src="data:image/png;base64,iVBORw=="' in parsed.html_body
+    assert "cid:" not in parsed.html_body
+    assert parsed.attachments == []
+
+
+def test_a_cid_url_is_url_decoded_and_matched_without_case():
+    parsed = parse_message(
+        related(
+            b"Content-ID: <Logo Part@x>", html=b"<td background='cid:logo%20part@X'>"
+        )
+    )
+    assert parsed.html_body is not None
+    assert "background='data:image/png;base64," in parsed.html_body
+    assert parsed.attachments == []
+
+
+def test_an_image_the_body_never_names_is_still_an_attachment():
+    parsed = parse_message(related(b"Content-ID: <other>"))
+    assert parsed.html_body == '<img src="cid:image0">'
+    assert [a.filename for a in parsed.attachments] == ["attachment"]
+
+
+def test_plain_text_that_reads_cid_is_left_alone():
+    parsed = parse_message(related(b"Content-ID: <image0>", html=b"<p>cid:image0</p>"))
+    assert parsed.html_body == "<p>cid:image0</p>"
+    assert len(parsed.attachments) == 1

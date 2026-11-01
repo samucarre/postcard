@@ -8,6 +8,7 @@ from email.policy import default as default_policy
 
 from ..models.attachment import Attachment
 from . import html_colors
+from .inline_images import inline_cid_images
 
 # RFC 2369 wraps each unsubscribe target in angle brackets and separates them
 # with commas, which may also appear inside a target -- so match the brackets.
@@ -55,6 +56,7 @@ def parse_message(raw: bytes, *, is_12_hour_clock: bool = False) -> ParsedMessag
     result.bcc = _addresses(msg, "Bcc")
     result.date = _format_date(msg.get("Date"), is_12_hour_clock)
 
+    others: list[EmailMessage] = []
     for part in msg.walk():
         if part.is_multipart():
             continue  # a container part -- its children are visited on their own
@@ -63,14 +65,21 @@ def parse_message(raw: bytes, *, is_12_hour_clock: bool = False) -> ParsedMessag
         disposition = part.get_content_disposition()
 
         if disposition == "attachment":
-            result.attachments.append(_as_attachment(part))
+            others.append(part)
         elif content_type == "text/plain" and result.text_body is None:
             result.text_body = part.get_content()
         elif content_type == "text/html" and result.html_body is None:
             result.html_body = part.get_content()
         else:
             # An inline image or unrecognised type is kept, not dropped.
-            result.attachments.append(_as_attachment(part))
+            others.append(part)
+
+    # An image the body shows through cid: is drawn in place, so it is not
+    # listed a second time as a file; any other part still is.
+    inlined: set[int] = set()
+    if result.html_body:
+        result.html_body, inlined = inline_cid_images(result.html_body, others)
+    result.attachments = [_as_attachment(p) for p in others if id(p) not in inlined]
 
     return result
 
