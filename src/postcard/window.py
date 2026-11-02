@@ -34,6 +34,7 @@ from .core.models.conversation import Conversation
 from .core.models.email import Email
 from .core.models.folder import Folder
 from .core.net import errors, imap_session
+from .core.net.auth import Credential
 from .core.store.database import Database
 from .folder_row import FolderRow
 from .message_view import LoadCallback, MessageView
@@ -897,7 +898,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         change: FlagChange,
         revert: Callable[[], None],
     ) -> None:
-        credential = secrets.credential_for(account)
+        credential = self._credential_or_none(account)
         if credential is None:
             logger.warning("could not sign in to account %s", account.email)
             GLib.idle_add(self._on_flag_sign_in_failed, revert)
@@ -1292,7 +1293,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # Runs on the worker thread: network only, no Gtk/database access.
     def _move_worker(self, pending: PendingMove) -> None:
         account = pending.account
-        credential = secrets.credential_for(account)
+        credential = self._credential_or_none(account)
         if credential is None:
             logger.warning("could not sign in to account %s", account.email)
             GLib.idle_add(self._on_move_sign_in_failed, pending)
@@ -2160,7 +2161,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         request: BodyRequest,
         callback: LoadCallback,
     ) -> None:
-        credential = secrets.credential_for(account)
+        credential = self._credential_or_none(account)
         if credential is None:
             logger.warning("could not sign in to account %s", account.email)
             GLib.idle_add(
@@ -2399,7 +2400,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         account: Account,
         jobs: list[tuple[int, str, list[str], bytes]],
     ) -> None:
-        credential = secrets.credential_for(account)
+        credential = self._credential_or_none(account)
         if credential is None:
             logger.warning(
                 "could not sign in to %s; the Outbox stays queued", account.email
@@ -2551,6 +2552,17 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         self._start_sync(account, in_background=True)
         return False
 
+    # For the workers whose only answer to a missing credential is to give up:
+    # a token refresh that fails on the network is the same as none, and must
+    # not take the thread down with its bookkeeping undone.
+    @staticmethod
+    def _credential_or_none(account: Account) -> Credential | None:
+        try:
+            return secrets.credential_for(account)
+        except Exception:
+            logger.exception("could not get a credential for %s", account.email)
+            return None
+
     # Runs on the worker thread: network only, no Gtk/database access.
     def _sync_worker(
         self,
@@ -2559,7 +2571,16 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         offset: int,
         should_count_unread: bool,
     ) -> None:
-        credential = secrets.credential_for(account)
+        try:
+            credential = secrets.credential_for(account)
+        except Exception as error:
+            # Refreshing an OAuth token is a network round trip: with the
+            # network gone it raises like a fetch would, and has to be reported
+            # the same way, or the account stays marked as syncing for good.
+            logger.exception("could not get a credential for %s", account.email)
+            is_auth_failure, message = errors.classify(error, account.imap_host)
+            GLib.idle_add(self._on_sync_error, account, is_auth_failure, message)
+            return
         if credential is None:
             logger.warning("could not sign in to account %s", account.email)
             GLib.idle_add(
