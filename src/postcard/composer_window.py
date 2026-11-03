@@ -35,7 +35,7 @@ from .core.threader import NO_SUBJECT
 logger = logging.getLogger(__name__)
 
 _EDITOR_PAGE = """<!DOCTYPE html>
-<html>
+<html class="{scheme}">
 <head>
 <meta charset="utf-8">
 <style>
@@ -53,11 +53,12 @@ _EDITOR_PAGE = """<!DOCTYPE html>
   a {{ color: #1c71d8; }}
   blockquote {{ color: #5e5c64; }}
   .signature {{ color: #5e5c64; }}
-  @media (prefers-color-scheme: dark) {{
-    body {{ color: #f6f5f4; }}
-    a {{ color: #78aeed; }}
-    blockquote, .signature {{ color: #c0bfbc; }}
-  }}
+  /* The window's own style manager says whether it is dark: WebKit's
+     prefers-color-scheme follows the GTK setting, which libadwaita leaves
+     alone when the scheme comes from the portal or ADW_DEBUG_COLOR_SCHEME. */
+  html.dark body {{ color: #f6f5f4; }}
+  html.dark a {{ color: #78aeed; }}
+  html.dark blockquote, html.dark .signature {{ color: #c0bfbc; }}
 </style>
 </head>
 <body contenteditable="true">{body}</body>
@@ -588,11 +589,33 @@ class PostcardComposerWindow(Adw.Window):
         # and the editor tracks the theme without hardcoding its colours.
         self._webview.set_background_color(Gdk.RGBA(red=0, green=0, blue=0, alpha=0))
         family, size = _gtk_font()
+        style_manager = Adw.StyleManager.get_default()
         self._webview.load_html(
-            _EDITOR_PAGE.format(family=family, size=size, body=self._body_html),
+            _EDITOR_PAGE.format(
+                family=family,
+                size=size,
+                body=self._body_html,
+                scheme="dark" if style_manager.get_dark() else "",
+            ),
             None,
         )
         self.body_container.append(self._webview)
+        self._dark_handler_id = style_manager.connect(
+            "notify::dark", self._on_dark_changed
+        )
+        self.connect("destroy", self._on_destroy)
+
+    def _on_dark_changed(self, manager: Adw.StyleManager, _pspec: object) -> None:
+        # Flip the class instead of reloading: a reload would drop the draft.
+        self._run_script(
+            "document.documentElement.classList.toggle('dark', %s);"
+            % json.dumps(manager.get_dark())
+        )
+
+    def _on_destroy(self, _window: Gtk.Window) -> None:
+        if self._dark_handler_id:
+            Adw.StyleManager.get_default().disconnect(self._dark_handler_id)
+            self._dark_handler_id = 0
 
     def _on_decide_policy(
         self,
