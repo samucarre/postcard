@@ -35,7 +35,7 @@ from .core.threader import NO_SUBJECT
 logger = logging.getLogger(__name__)
 
 _EDITOR_PAGE = """<!DOCTYPE html>
-<html class="{scheme}">
+<html style="{palette}">
 <head>
 <meta charset="utf-8">
 <style>
@@ -46,19 +46,19 @@ _EDITOR_PAGE = """<!DOCTYPE html>
     font-family: {family};
     font-size: {size}pt;
     line-height: 1.5;
-    color: #241f31;
+    color: var(--fg);
     background: transparent;
     outline: none;
   }}
-  a {{ color: #1c71d8; }}
-  blockquote {{ color: #5e5c64; }}
-  .signature {{ color: #5e5c64; }}
-  /* The window's own style manager says whether it is dark: WebKit's
-     prefers-color-scheme follows the GTK setting, which libadwaita leaves
-     alone when the scheme comes from the portal or ADW_DEBUG_COLOR_SCHEME. */
-  html.dark body {{ color: #f6f5f4; }}
-  html.dark a {{ color: #78aeed; }}
-  html.dark blockquote, html.dark .signature {{ color: #c0bfbc; }}
+  /* The palette is the window's own (GTK's foreground and accent colours),
+     set as variables on <html>: WebKit's prefers-color-scheme follows the
+     GTK prefer-dark setting, which libadwaita leaves alone when the scheme
+     comes from the portal or ADW_DEBUG_COLOR_SCHEME, and a user stylesheet
+     may recolour the window anyway. The variables live outside <body>, so
+     they never travel with the message. */
+  a {{ color: var(--accent); }}
+  blockquote {{ color: var(--muted); }}
+  .signature {{ color: var(--muted); }}
 </style>
 </head>
 <body contenteditable="true">{body}</body>
@@ -595,7 +595,7 @@ class PostcardComposerWindow(Adw.Window):
                 family=family,
                 size=size,
                 body=self._body_html,
-                scheme="dark" if style_manager.get_dark() else "",
+                palette=self._editor_palette(),
             ),
             None,
         )
@@ -605,11 +605,21 @@ class PostcardComposerWindow(Adw.Window):
         )
         self.connect("destroy", self._on_destroy)
 
-    def _on_dark_changed(self, manager: Adw.StyleManager, _pspec: object) -> None:
-        # Flip the class instead of reloading: a reload would drop the draft.
+    def _editor_palette(self) -> str:
+        """The editor's colours as CSS variables, taken from the window's style."""
+        fg = self.get_color()
+        muted = Gdk.RGBA(red=fg.red, green=fg.green, blue=fg.blue, alpha=fg.alpha * 0.7)
+        accent = Adw.StyleManager.get_default().get_accent_color_rgba()
+        return (
+            f"--fg: {fg.to_string()}; --muted: {muted.to_string()}; "
+            f"--accent: {accent.to_string()};"
+        )
+
+    def _on_dark_changed(self, _manager: Adw.StyleManager, _pspec: object) -> None:
+        # Restyle in place instead of reloading: a reload would drop the draft.
         self._run_script(
-            "document.documentElement.classList.toggle('dark', %s);"
-            % json.dumps(manager.get_dark())
+            "document.documentElement.style.cssText = %s;"
+            % json.dumps(self._editor_palette())
         )
 
     def _on_destroy(self, _window: Gtk.Window) -> None:

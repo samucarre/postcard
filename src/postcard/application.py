@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from gettext import gettext as _
 
 import gi
@@ -8,7 +9,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Adw, Gio, GLib
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from .composer_window import composer_for_mailto
 from .core import APP_ID
@@ -69,6 +70,7 @@ class PostcardApplication(Adw.Application):
         Adw.Application.do_startup(self)
         # Before any WebView exists: the sandbox paths can't change once a web process runs.
         expose_graphics_driver_paths()
+        load_user_stylesheet()
         self.tray.start()
         self.settings.connect(
             "changed::run-in-background", self._on_run_in_background_changed
@@ -157,3 +159,21 @@ class PostcardApplication(Adw.Application):
 
     def on_new_window_action(self, *_args: object) -> None:
         PostcardMainWindow(self, self.db, self.settings).present()
+
+
+def load_user_stylesheet() -> None:
+    """Apply ~/.config/postcard/style.css, the user's own look, over the theme.
+
+    Loaded at USER priority, so it overrides both libadwaita's palette (the
+    --window-bg-color family) and the app's style.css, the way gtk.css would,
+    but for this app alone.
+    """
+    path = Path(GLib.get_user_config_dir()) / "postcard" / "style.css"
+    if not path.is_file():
+        return
+    provider = Gtk.CssProvider()
+    provider.load_from_path(str(path))
+    Gtk.StyleContext.add_provider_for_display(
+        Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_USER
+    )
+    logger.info("user stylesheet loaded from %s", path)
