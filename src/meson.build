@@ -48,6 +48,7 @@ postcard_sources = [
   'postcard/tray.py',
   'postcard/webkit_sandbox.py',
   'postcard/mail_sync.py',
+  'postcard/backfill.py',
   'postcard/folder_row.py',
 ]
 python_installation.install_sources(postcard_sources, subdir: 'postcard')

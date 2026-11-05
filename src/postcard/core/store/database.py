@@ -101,6 +101,22 @@ MIGRATIONS = [
     """,
     # NULL until the next sync reads it; see set_folder_uidvalidity.
     "ALTER TABLE folders ADD COLUMN uidvalidity INTEGER",
+    # Bodies move out of the emails row. SQLite stores a row's columns in
+    # order and the BLOB sits mid-row, so with every body downloaded (the
+    # whole mailbox, gigabytes) reading the columns after it walked each
+    # body's overflow pages on every list. The index lets a folder be read
+    # newest-UID-first a page at a time instead of whole.
+    """
+    CREATE TABLE IF NOT EXISTS bodies (
+        email_id INTEGER PRIMARY KEY REFERENCES emails(id) ON DELETE CASCADE,
+        raw BLOB NOT NULL
+    );
+    INSERT OR IGNORE INTO bodies (email_id, raw)
+        SELECT id, raw_message FROM emails WHERE raw_message IS NOT NULL;
+    UPDATE emails SET raw_message = NULL WHERE raw_message IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_emails_uid_order
+        ON emails (folder_id, CAST(server_id AS INTEGER));
+    """,
 ]
 
 
@@ -111,6 +127,7 @@ class Database:
             os.makedirs(data_dir, exist_ok=True)
             path = os.path.join(data_dir, "postcard.db")
 
+        self.path = path
         self._conn = sqlite3.connect(path)
         self._conn.row_factory = sqlite3.Row
         # Mirrors the "group-conversations" setting: off, every message is
@@ -458,6 +475,11 @@ class Database:
         This runs after every sync, where almost nothing has moved thread, so
         rows that already hold the right id are left alone.
         """
+        if not self.group_conversations:
+            # Ungrouped, nothing reads the ids, and on a whole mailbox the
+            # regrouping costs seconds of the main loop on every sync. Turning
+            # grouping on catches each folder up (window._on_grouping_changed).
+            return
         emails = self.emails_in_folder(folder_id)
         groups = threader.group(emails)
         with self._conn:
@@ -500,7 +522,11 @@ class Database:
 
         places = ",".join("?" * len(folder_ids))
         # Ungrouped, only the matching messages themselves are listed.
-        thread_key = "COALESCE({0}conversation_id, {0}id)" if self.group_conversations else "{0}id"
+        thread_key = (
+            "COALESCE({0}conversation_id, {0}id)"
+            if self.group_conversations
+            else "{0}id"
+        )
         rows = self._conn.execute(
             f"""
             SELECT {_EMAIL_COLUMNS} FROM emails
@@ -515,20 +541,118 @@ class Database:
         ).fetchall()
         return self._conversations_from_rows(rows, is_multi_folder=len(folder_ids) > 1)
 
+    def list_conversations(
+        self,
+        folder_ids: Sequence[int],
+        query: str = "",
+        *,
+        limit: int,
+        unread_only: bool = False,
+        keep_id: int | None = None,
+    ) -> tuple[list[Conversation], bool]:
+        """The newest `limit` messages of the folders, as conversations.
+
+        With the whole mailbox stored (a hundred thousand messages in one
+        inbox) building every row on each refresh froze the window, so the
+        list is read a page at a time, newest UID first, and grows on scroll.
+        Returns the conversations and whether more are stored beyond them.
+        Local copies with no UID yet (a just-sent message) always come along:
+        they sort as the newest. keep_id is listed even when the unread
+        filter would drop it, so the open conversation doesn't vanish.
+        """
+        if not folder_ids:
+            return [], False
+
+        match = _fts_query(query) if query else ""
+        extra = (
+            " AND (e.unread = 1 OR e.id = ? OR e.conversation_id = ?)"
+            if unread_only
+            else ""
+        )
+        extra_args: tuple[object, ...] = (
+            (keep_id or -1, keep_id or -1) if unread_only else ()
+        )
+        columns = ", ".join(f"e.{c.strip()}" for c in _EMAIL_COLUMNS.split(","))
+        source = "emails e"
+        if match:
+            source = "emails e JOIN emails_fts ON emails_fts.rowid = e.id"
+            extra += " AND emails_fts MATCH ?"
+            extra_args += (match,)
+
+        rows: list[sqlite3.Row] = []
+        has_more = False
+        for folder_id in folder_ids:
+            rows += self._conn.execute(
+                f"""
+                SELECT {columns} FROM {source}
+                WHERE e.folder_id = ?
+                  AND (e.server_id IS NULL OR e.server_id = ''){extra}
+                """,
+                (folder_id, *extra_args),
+            ).fetchall()
+            page = self._conn.execute(
+                f"""
+                SELECT {columns} FROM {source}
+                WHERE e.folder_id = ? AND e.server_id != ''{extra}
+                ORDER BY CAST(e.server_id AS INTEGER) DESC
+                LIMIT ?
+                """,
+                (folder_id, *extra_args, limit + 1),
+            ).fetchall()
+            if len(page) > limit:
+                has_more = True
+                page = page[:limit]
+            rows += page
+
+        if self.group_conversations and rows:
+            # The rest of each listed thread, wherever it falls in the folder.
+            seen = {row["id"] for row in rows}
+            thread_ids = sorted(
+                {row["conversation_id"] for row in rows if row["conversation_id"]}
+            )
+            places = ",".join("?" * len(folder_ids))
+            for start in range(0, len(thread_ids), 500):
+                chunk = thread_ids[start : start + 500]
+                for row in self._conn.execute(
+                    f"""
+                    SELECT {columns} FROM emails e
+                    WHERE e.folder_id IN ({places})
+                      AND e.conversation_id IN ({",".join("?" * len(chunk))})
+                    """,
+                    (*folder_ids, *chunk),
+                ):
+                    if row["id"] not in seen:
+                        seen.add(row["id"])
+                        rows.append(row)
+
+        conversations = self._conversations_from_rows(
+            rows, is_multi_folder=len(folder_ids) > 1
+        )
+        if len(conversations) > limit:
+            has_more = True
+            conversations = conversations[:limit]
+        return conversations, has_more
+
     def _conversations_from_rows(
         self, rows: Sequence[sqlite3.Row], *, is_multi_folder: bool
     ) -> list[Conversation]:
         groups: dict[int, list[Email]] = {}
         for row in rows:
             email = self._email_from_row(row)
-            key = (email.conversation_id or email.id) if self.group_conversations else email.id
+            key = (
+                (email.conversation_id or email.id)
+                if self.group_conversations
+                else email.id
+            )
             groups.setdefault(key, []).append(email)
 
         conversations = []
         for key, mails in groups.items():
             mails.sort(key=_arrival_key)  # oldest first, so .latest is right
             conversations.append(
-                Conversation(mails) if self.group_conversations else Conversation(mails, id=key)
+                Conversation(mails)
+                if self.group_conversations
+                else Conversation(mails, id=key)
             )
         thread_key = _sent_key if is_multi_folder else _arrival_key
         conversations.sort(key=lambda c: thread_key(c.latest), reverse=True)
@@ -604,24 +728,29 @@ class Database:
 
     def get_raw_message(self, email_id: int) -> bytes | None:
         row = self._conn.execute(
-            "SELECT raw_message FROM emails WHERE id = ?", (email_id,)
+            "SELECT raw FROM bodies WHERE email_id = ?", (email_id,)
         ).fetchone()
 
-        return row["raw_message"] if row else None
+        return row["raw"] if row else None
 
     def save_raw_message(self, email_id: int, raw: bytes) -> None:
         # A row saved locally (a Sent copy, a draft) has no Message-ID of its own
         # until now; save_incoming_email needs it to spot the server's copy.
         message_id = BytesHeaderParser().parsebytes(raw)["Message-ID"] or ""
-        self._conn.execute(
-            """
-            UPDATE emails
-            SET raw_message = ?, message_id = COALESCE(NULLIF(message_id, ''), ?)
-            WHERE id = ?
-            """,
-            (raw, str(message_id).strip(), email_id),
-        )
-        self._conn.commit()
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE emails
+                SET message_id = COALESCE(NULLIF(message_id, ''), ?)
+                WHERE id = ?
+                """,
+                (str(message_id).strip(), email_id),
+            )
+            if cursor.rowcount:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO bodies (email_id, raw) VALUES (?, ?)",
+                    (email_id, raw),
+                )
 
     def save_email(
         self,

@@ -24,6 +24,10 @@ MOVE_UNDO_MS = 5000
 # Wait for typing to settle before running a search over FTS.
 SEARCH_DEBOUNCE_MS = 200
 
+# How many messages the list reads from the database at a time; scrolling to
+# the bottom reads the next page. The whole mailbox is stored (backfill.py).
+LIST_PAGE_SIZE = 300
+
 # How long a folder counts as freshly synced. Opening one costs a connection,
 # a login and a header fetch, which clicking between two folders would
 # otherwise pay for on every visit.

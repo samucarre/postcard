@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Graphene, Gtk
 
-from . import mail_sync, message_view
+from . import backfill, mail_sync, message_view
 from .account_dialog import PostcardAccountDialog
 from .accounts_dialog import PostcardAccountsDialog
 from .avatar_loader import AvatarLoader
@@ -42,6 +42,7 @@ from .online_accounts_dialog import PostcardOnlineAccountsDialog
 from .window_types import (
     ALL_INBOXES_ID,
     FOLDER_SYNC_COOLDOWN_SECONDS,
+    LIST_PAGE_SIZE,
     MAIL_ACTIONS,
     MOVE_UNDO_MS,
     PAGE_EMPTY,
@@ -295,6 +296,15 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         # and whether older messages remain on the server.
         self._loaded_counts: dict[int, int] = {}
         self._folders_with_more_mail: dict[int, bool] = {}
+        # How many of the stored messages the list shows, and whether more are
+        # stored past them. The whole mailbox is downloaded (backfill), so the
+        # list is read from the database a page at a time and grows on scroll.
+        self._list_limit = LIST_PAGE_SIZE
+        self._is_list_capped = False
+        self._backfill = backfill.Backfill(
+            self._db.path,
+            lambda folder_id: GLib.idle_add(self._on_backfill_progress, folder_id),
+        )
         # When each folder was last synced, so revisiting one doesn't refetch.
         self._folder_sync_times: dict[int, float] = {}
         # Unread counts the server last reported for the folders we don't
@@ -1574,6 +1584,8 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             return
         previous = self._current_folder
         self._current_folder = folder
+        if folder is not previous:
+            self._list_limit = LIST_PAGE_SIZE
         # All Inboxes belongs to no account, so Compose falls back to the first.
         self._account = self._accounts.get(folder.account_id) or next(
             iter(self._accounts.values()), None
@@ -1718,6 +1730,10 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     # action can refresh without reloading the reader.
     def _on_grouping_changed(self, settings: Gio.Settings, key: str) -> None:
         self._db.group_conversations = settings.get_boolean(key)
+        if self._db.group_conversations:
+            # Syncs skip threading while it's off, so catch every folder up.
+            for folder_id in list(self._folders_by_id):
+                self._db.reassign_conversations(folder_id)
         self._refresh_conversations()
 
     def _refresh_conversations(self, keep_id: int | None = None) -> None:
@@ -1737,13 +1753,16 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         """The conversations on screen, narrowed by the search box and filter."""
         folder_ids = [folder.id for folder in self._view_folders()]
         query = self.search_entry.get_text().strip()
-        matches = (
-            self._db.search_conversations(folder_ids, query)
-            if query
-            else self._db.conversations_in_folders(folder_ids)
+        is_unread_only = self.unread_button.get_active()
+        matches, self._is_list_capped = self._db.list_conversations(
+            folder_ids,
+            query,
+            limit=self._list_limit,
+            unread_only=is_unread_only,
+            keep_id=keep_id,
         )
 
-        if not self.unread_button.get_active():
+        if not is_unread_only:
             return matches
         # Keep the conversation being read (keep_id) even once it's marked read,
         # so opening a mail here doesn't make it vanish under you; it drops out
@@ -1829,6 +1848,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
 
     def _on_search_timeout(self) -> bool:
         self._search_timeout = 0
+        self._list_limit = LIST_PAGE_SIZE
         self._refresh_conversations()
         return False
 
@@ -1856,7 +1876,14 @@ class PostcardMainWindow(Adw.ApplicationWindow):
     def _on_list_edge_reached(
         self, _scroller: Gtk.ScrolledWindow, pos: Gtk.PositionType
     ) -> None:
-        if pos != Gtk.PositionType.BOTTOM or not self._is_online:
+        if pos != Gtk.PositionType.BOTTOM:
+            return
+        if self._is_list_capped:
+            self._list_limit += LIST_PAGE_SIZE
+            selected = self._selected_conversation()
+            self._refresh_conversations(keep_id=selected.id if selected else None)
+            return
+        if not self._is_online:
             return
         if self._is_view_syncing():
             return
@@ -2701,6 +2728,21 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         if account.id in self._resync_account_ids:
             self._resync_account_ids.discard(account.id)
             self._start_sync(account, in_background=True)
+        self._kick_backfill()
+        return False
+
+    def _kick_backfill(self) -> None:
+        if self._is_online:
+            self._backfill.kick(self._accounts.values())
+
+    # The download filled in older mail of a folder: if it's on screen and the
+    # list wasn't already full, show what arrived. Runs on the main loop.
+    def _on_backfill_progress(self, folder_id: int) -> bool:
+        if self._is_list_capped or self._current_folder is None:
+            return False
+        if folder_id in {folder.id for folder in self._view_folders()}:
+            selected = self._selected_conversation()
+            self._refresh_conversations(keep_id=selected.id if selected else None)
         return False
 
     def _store_mailboxes(
