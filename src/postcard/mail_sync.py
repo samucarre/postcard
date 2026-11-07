@@ -1,3 +1,4 @@
+import imaplib
 import logging
 import re
 import threading
@@ -558,6 +559,11 @@ def _to_message_header(fetched: FetchedHeader) -> MessageHeader:
     )
 
 
+# What a connection that is gone fails with: imaplib's abort (the server hung
+# up: "socket error: EOF") or the socket's own error (reset, timed out).
+CONNECTION_LOST_ERRORS = (imaplib.IMAP4.abort, OSError)
+
+
 def fetch_full_message(
     account: Account,
     credential: Credential,
@@ -566,9 +572,38 @@ def fetch_full_message(
     *,
     uidvalidity: int | None,
 ) -> bytes:
-    """Open one folder and download a single full message."""
+    """Open one folder and download a single full message.
+
+    The pool only probes a connection that has sat idle for PROBE_IDLE_SECONDS,
+    so one the server hung up on right after its last use fails on its first
+    command -- with Gmail, opening a message that a sync had just announced
+    showed "command: EXAMINE => socket error: EOF". Reading changes nothing on
+    the server, so it is asked once more, on a new connection: the failed one
+    never goes back in the pool. A refusal (ImapError, UidValidityError) is the
+    server's answer, not a lost connection, and is not retried.
+    """
     if account.is_graph:
         return graph_messages.fetch_mime(GraphSession(credential), uid)
+    try:
+        return _fetch_full_message(account, credential, folder_name, uid, uidvalidity)
+    except CONNECTION_LOST_ERRORS as error:
+        logger.info(
+            "lost the IMAP connection to %s while opening uid %s (%s); "
+            "trying again on a new one",
+            account.email,
+            uid,
+            error,
+        )
+    return _fetch_full_message(account, credential, folder_name, uid, uidvalidity)
+
+
+def _fetch_full_message(
+    account: Account,
+    credential: Credential,
+    folder_name: str,
+    uid: str,
+    uidvalidity: int | None,
+) -> bytes:
     with _pooled_session(account, credential) as session:
         _select(session, folder_name, uidvalidity, is_readonly=True)
         return session.fetch_message(uid)

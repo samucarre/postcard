@@ -1,3 +1,4 @@
+import imaplib
 import queue
 import threading
 from datetime import date, datetime, timedelta
@@ -798,6 +799,56 @@ def pooled(monkeypatch):
     CountingSession.move_fails = False
     monkeypatch.setattr(mail_sync, "ImapSession", CountingSession)
     return CountingSession
+
+
+class DroppingSession(CountingSession):
+    """A server that hangs up on a connection the moment it is used, `drops`
+    times, the way Gmail can right after a sync's last command."""
+
+    drops = 0
+
+    def select(self, mailbox, is_readonly=True):
+        if type(self).drops:
+            type(self).drops -= 1
+            raise imaplib.IMAP4.abort("command: EXAMINE => socket error: EOF")
+        return super().select(mailbox, is_readonly)
+
+    def fetch_message(self, uid):
+        return b"Subject: hello\r\n\r\nbody"
+
+
+@pytest.fixture
+def dropping(pooled, monkeypatch):
+    DroppingSession.connects = 0
+    DroppingSession.logouts = 0
+    DroppingSession.drops = 1
+    monkeypatch.setattr(mail_sync, "ImapSession", DroppingSession)
+    return DroppingSession
+
+
+def test_opening_a_message_on_a_dropped_connection_retries_on_a_new_one(dropping):
+    raw = fetch_full_message(account(), CREDENTIAL, "INBOX", "4", uidvalidity=1)
+
+    assert raw == b"Subject: hello\r\n\r\nbody"
+    assert dropping.connects == 2
+
+
+def test_opening_a_message_retries_only_once(dropping):
+    dropping.drops = 2
+
+    with pytest.raises(imaplib.IMAP4.abort):
+        fetch_full_message(account(), CREDENTIAL, "INBOX", "4", uidvalidity=1)
+
+    assert dropping.connects == 2
+
+
+def test_opening_a_message_the_server_refuses_is_not_retried(pooled):
+    pooled.select_fails = True
+
+    with pytest.raises(ImapError):
+        fetch_full_message(account(), CREDENTIAL, "INBOX", "4", uidvalidity=1)
+
+    assert pooled.connects == 1
 
 
 @pytest.fixture
