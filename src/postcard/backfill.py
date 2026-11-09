@@ -8,9 +8,11 @@ then every body, newest first, so old mail opens at once and offline.
 
 It runs on its own IMAP connection and its own SQLite connection, so neither
 the window's syncs nor the main loop wait on it, and it never notifies: the
-window's own sync stays the only thing that announces new mail. Only messages
-older than the newest one the window already holds are filled in, so a message
-that has just arrived is still the window's to find and announce.
+window's own sync stays the only thing that announces new mail. In the folders
+the window looks after (the inbox and the other role folders) only messages older
+than the newest one it holds are filled in, so a message that has just arrived is
+still the window's to find and announce. A user's own folder has nobody else
+keeping it fresh until it's opened, so its new mail comes down here too, unannounced.
 """
 
 import json
@@ -26,7 +28,7 @@ from datetime import datetime
 from gi.repository import GLib
 
 from . import mail_sync
-from .core import secrets
+from .core import filing_rules, secrets
 from .core.models.account import Account
 from .core.net.imap_session import ATTR_NOSELECT, STATUS_OK, ImapError, ImapSession
 
@@ -261,11 +263,24 @@ class Backfill:
         conn: sqlite3.Connection,
         folders: list[tuple[int, str]],
     ) -> None:
+        rules = filing_rules.load()
+        failures: list[ImapError] = []
         for folder_id, name in folders:
             self._check_stop()
             if not self._open(session, conn, folder_id, name):
                 continue
-            on_server = {int(uid) for uid in session.search_all_uids()}
+            is_own_folder = (
+                mail_sync.role_for_folder(name) is mail_sync.FolderRole.OTHER
+            )
+            try:
+                on_server = {int(uid) for uid in session.search_all_uids()}
+            except ImapError as error:
+                # Seen on iCloud: a folder selected as non-empty, then a search
+                # with no answer. That mustn't cost the folders after it their
+                # turn; raising at the end still gets the pass retried.
+                logger.warning("could not list %s on %s", name, account.email)
+                failures.append(error)
+                continue
             local = {
                 int(row[0])
                 for row in conn.execute(
@@ -280,7 +295,7 @@ class Backfill:
                 (
                     uid
                     for uid in on_server - local
-                    if newest_local is None or uid < newest_local
+                    if is_own_folder or newest_local is None or uid < newest_local
                 ),
                 reverse=True,
             )
@@ -293,7 +308,11 @@ class Backfill:
             stored = len(on_server & local)
             for chunk in _chunks(missing, HEADERS_PER_FETCH):
                 self._check_stop()
-                headers = self._fetch_headers(session, chunk)
+                headers = [
+                    header
+                    for header in self._fetch_headers(session, chunk)
+                    if not rules.is_leaving(account.email, name, header)
+                ]
                 with conn:
                     conn.executemany(
                         """
@@ -326,6 +345,8 @@ class Backfill:
                 stored += len(headers)
                 self._note(account, name, cabeceras=stored)
                 self._on_progress(folder_id)
+        if failures:
+            raise failures[0]
 
     def _fetch_headers(self, session: ImapSession, uids: Sequence[int]) -> list:
         status, payload = session._require_imap().uid(  # noqa: SLF001

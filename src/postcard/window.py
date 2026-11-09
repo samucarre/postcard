@@ -26,7 +26,7 @@ from .composer_window import (
     signature_html,
 )
 from .conversation_row import ConversationRow
-from .core import avatars, compose, goa, secrets
+from .core import avatars, compose, filing_rules, goa, secrets
 from .core.mime.message_parser import ParsedMessage, Unsubscribe, parse_unsubscribe
 from .core.models.account import Account
 from .core.models.attachment import Attachment
@@ -2686,13 +2686,7 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             self._loaded_counts.pop(target.id, None)
             for key in [key for key in self._move_tombstones if key[0] == target.id]:
                 del self._move_tombstones[key]
-        new_messages: list[mail_sync.MessageHeader] = []
-        for message in result.messages:
-            if (target.id, message.uid) in self._move_tombstones:
-                continue
-            added = self._db.save_incoming_email(target.id, message)
-            if added and message.is_unread:
-                new_messages.append(message)
+        new_messages = self._store_fetched(account, target, result)
         if result.all_uids is not None:
             self._db.prune_stale_emails(target.id, result.all_uids)
             # Do this after filtering the fetched headers: an older snapshot
@@ -2730,6 +2724,23 @@ class PostcardMainWindow(Adw.ApplicationWindow):
             self._start_sync(account, in_background=True)
         self._kick_backfill()
         return False
+
+    def _store_fetched(
+        self, account: Account, target: Folder, result: mail_sync.SyncResult
+    ) -> list[mail_sync.MessageHeader]:
+        """Save what a sync fetched; return the messages worth announcing."""
+        rules = filing_rules.load()
+        is_announced = not rules.is_destination(account.email, result.folder)
+        new_messages: list[mail_sync.MessageHeader] = []
+        for message in result.messages:
+            if (target.id, message.uid) in self._move_tombstones:
+                continue
+            if rules.is_leaving(account.email, result.folder, message):
+                continue
+            added = self._db.save_incoming_email(target.id, message)
+            if added and message.is_unread and is_announced:
+                new_messages.append(message)
+        return new_messages
 
     def _kick_backfill(self) -> None:
         if self._is_online:
@@ -2795,15 +2806,22 @@ class PostcardMainWindow(Adw.ApplicationWindow):
         """Store the server's unread counts; return how many arrived per folder.
 
         A folder we have no earlier count for is only recorded -- on the first
-        sync every count would otherwise read as new mail.
+        sync every count would otherwise read as new mail. Nor does a rise mean
+        news if it could be mail about to be filed away: the inbox watcher still
+        announces real arrivals, by name, once it syncs them.
         """
+        rules = filing_rules.load()
         arrived: dict[str, int] = {}
         for name, count in counts.items():
             folder = self._db.get_folder_by_name(account.id, name)
             if folder is None:
                 continue
             previous = self._remote_unread_counts.get(folder.id)
-            if previous is not None and count > previous:
+            if (
+                previous is not None
+                and count > previous
+                and not rules.may_count_leaving_mail(account.email, name)
+            ):
                 arrived[mail_sync.folder_label(folder)] = count - previous
             self._remote_unread_counts[folder.id] = count
         return arrived
